@@ -1,101 +1,131 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import os
 from dotenv import load_dotenv
 import google.generativeai as genai
 from datetime import datetime
-import json
+import logging
 
-def save_to_file(content, content_type):
-    # Create 'outputs' directory if it doesn't exist
-    if not os.path.exists('outputs'):
-        os.makedirs('outputs')
-    
-    # Generate filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"outputs/{content_type}_{timestamp}.txt"
-    
-    # Save content
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write(content)
-    
-    return filename
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def generate_content(model, prompt):
-    response = model.generate_content(prompt)
-    return response.text
+app = Flask(__name__)
+CORS(app)
 
-def get_prompt_for_type(content_type):
-    prompts = {
-        '1': "Write a blog post about ",
-        '2': "Write a social media post about ",
-        '3': "Write a joke about ",
-        '4': "Write a tutorial about "
-    }
-    topic = input("Enter the topic: ")
-    return prompts[content_type] + topic
-
-def main():
-    # Load environment variables
-    load_dotenv()
-    
-    # Get API key
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("Error: GEMINI_API_KEY not found in .env file")
-        return
-    
-    # Configure Gemini
+# Load environment variables and configure API
+def init_api():
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-pro')
+        load_dotenv()
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY not found in .env file")
         
-        while True:
-            print("\n=== Content Generator Menu ===")
-            print("1. Generate Blog Post")
-            print("2. Generate Social Media Post")
-            print("3. Generate Joke")
-            print("4. Generate Tutorial")
-            print("5. Exit")
-            
-            choice = input("\nEnter your choice (1-5): ")
-            
-            if choice == '5':
-                print("Thank you for using the Content Generator!")
-                break
-            
-            if choice not in ['1', '2', '3', '4']:
-                print("Invalid choice. Please try again.")
-                continue
-            
-            content_types = {
-                '1': 'blog',
-                '2': 'social',
-                '3': 'joke',
-                '4': 'tutorial'
-            }
-            
-            # Get prompt based on content type
-            prompt = get_prompt_for_type(choice)
-            
-            print("\nGenerating content...")
-            content = generate_content(model, prompt)
-            
-            # Display the generated content
-            print("\nGenerated Content:")
-            print("=" * 50)
-            print(content)
-            print("=" * 50)
-            
-            # Ask if user wants to save the content
-            if input("\nWould you like to save this content? (y/n): ").lower() == 'y':
-                filename = save_to_file(content, content_types[choice])
-                print(f"Content saved to: {filename}")
-            
+        genai.configure(api_key=api_key)
+        return genai.GenerativeModel('gemini-pro')
     except Exception as e:
-        print(f"An error occurred: {str(e)}")
-        print("\nPossible solutions:")
-        print("1. Check if your API key is correct")
-        print("2. Make sure you're using a valid Gemini API key from: https://makersuite.google.com/app/apikey")
-        print("3. Check your internet connection")
+        logger.error(f"Failed to initialize API: {str(e)}")
+        raise
 
-if __name__ == "__main__":
-    main()
+# Initialize the model
+try:
+    model = init_api()
+except Exception as e:
+    logger.error(f"Application startup failed: {str(e)}")
+    model = None
+
+def create_prompt(content_type, topic):
+    prompts = {
+        '1': {
+            'text': f"Write an engaging and informative blog post about {topic}. Include an introduction, main points, and conclusion.",
+            'temp': 0.7
+        },
+        '2': {
+            'text': f"Create an attention-grabbing social media post about {topic} that will drive engagement. Include relevant hashtags.",
+            'temp': 0.8
+        },
+        '3': {
+            'text': f"Tell a funny and creative joke about {topic}. Make it original and entertaining.",
+            'temp': 0.9
+        },
+        '4': {
+            'text': f"Create a clear, step-by-step tutorial about {topic}. Include introduction, requirements, steps, and tips for success.",
+            'temp': 0.6
+        }
+    }
+    return prompts.get(content_type, {'text': '', 'temp': 0.7})
+
+def save_content(content, content_type):
+    try:
+        # Create outputs directory if it doesn't exist
+        os.makedirs('outputs', exist_ok=True)
+        
+        # Generate filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        content_types = {
+            '1': 'blog',
+            '2': 'social',
+            '3': 'joke',
+            '4': 'tutorial'
+        }
+        type_name = content_types.get(content_type, 'content')
+        filename = f"outputs/{type_name}_{timestamp}.txt"
+        
+        # Save the content
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        return filename
+    except Exception as e:
+        logger.error(f"Failed to save content: {str(e)}")
+        raise
+
+@app.route('/generate', methods=['POST'])
+def generate_content():
+    if not model:
+        return jsonify({'error': 'API not properly initialized'}), 500
+    
+    try:
+        data = request.get_json()
+        content_type = data.get('content_type')
+        topic = data.get('topic')
+        
+        if not content_type or not topic:
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        prompt_data = create_prompt(content_type, topic)
+        if not prompt_data['text']:
+            return jsonify({'error': 'Invalid content type'}), 400
+        
+        response = model.generate_content(
+            prompt_data['text'],
+            generation_config=genai.types.GenerationConfig(
+                temperature=prompt_data['temp']
+            )
+        )
+        
+        return jsonify({'content': response.text})
+    
+    except Exception as e:
+        logger.error(f"Content generation failed: {str(e)}")
+        return jsonify({'error': 'Failed to generate content'}), 500
+
+@app.route('/save', methods=['POST'])
+def save_content_endpoint():
+    try:
+        data = request.get_json()
+        content = data.get('content')
+        content_type = data.get('content_type')
+        
+        if not content or not content_type:
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        filename = save_content(content, content_type)
+        return jsonify({'filename': filename})
+    
+    except Exception as e:
+        logger.error(f"Content saving failed: {str(e)}")
+        return jsonify({'error': 'Failed to save content'}), 500
+
+if __name__ == '__main__':
+    app.run(debug=True)
